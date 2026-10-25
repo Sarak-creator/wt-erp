@@ -1,0 +1,16 @@
+{
+  "name": "សហគ្រាសផលិតទឹកបរិសុទ្ធ | Pure Water Factory ERP",
+  "short_name": "WaterERP",
+  "description": "Pure Water Factory ERP, POS, Bottle Deposit Tracking & Logistics PWA",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0284c7",
+  "theme_color": "#0284c7",
+  "icons": [
+    {
+      "src": "/favicon.ico",
+      "sizes": "64x64 32x32 24x24 16x16",
+      "type": "image/x-icon"
+    }
+  ]
+}
