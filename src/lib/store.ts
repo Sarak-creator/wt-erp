@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { Customer, InventoryItem, Order, UserRole, BottleLedger, ProductionBatch } from '@/types/database';
 import { Language, translations } from './i18n';
+import { createClient } from '@/utils/supabase/client';
 
 export interface CartItem {
   item: InventoryItem;
@@ -15,6 +16,12 @@ interface AppState {
   setLang: (lang: Language) => void;
   currentRole: UserRole;
   setCurrentRole: (role: UserRole) => void;
+
+  // Supabase Connection Status
+  isSyncing: boolean;
+  supabaseConnected: boolean;
+  syncError: string | null;
+  fetchFromSupabase: () => Promise<void>;
 
   // Customers
   customers: Customer[];
@@ -50,7 +57,7 @@ interface AppState {
   addBatch: (batch: ProductionBatch) => void;
 }
 
-// Initial sample data grounded in Cambodian pure water factory operations
+// Initial fallback sample data (if Supabase is not yet populated)
 const initialCustomers: Customer[] = [
   {
     id: 'c1',
@@ -62,7 +69,7 @@ const initialCustomers: Customer[] = [
     price_tier: 'wholesale',
     credit_limit: 200.0,
     current_balance: 35.0,
-    deposit_balance: 60.0, // 20 bottles deposit @ $3 = $60
+    deposit_balance: 60.0,
     empty_bottles_held: 20,
     active: true,
     created_at: new Date().toISOString(),
@@ -77,7 +84,7 @@ const initialCustomers: Customer[] = [
     zone_id: 'z2',
     price_tier: 'subscription',
     credit_limit: 500.0,
-    current_balance: 480.0, // Near limit test case
+    current_balance: 480.0,
     deposit_balance: 150.0,
     empty_bottles_held: 50,
     active: true,
@@ -93,7 +100,7 @@ const initialCustomers: Customer[] = [
     zone_id: 'z3',
     price_tier: 'wholesale',
     credit_limit: 300.0,
-    current_balance: 310.0, // Over limit test case!
+    current_balance: 310.0,
     deposit_balance: 90.0,
     empty_bottles_held: 30,
     active: true,
@@ -176,7 +183,7 @@ const initialInventory: InventoryItem[] = [
     unit: 'gallon',
     qty_on_hand: 1400,
     unit_cost: 3.5,
-    retail_price: 3.0, // standard deposit rate
+    retail_price: 3.0,
     wholesale_price: 3.0,
     reorder_level: 300,
     is_active: true,
@@ -350,10 +357,101 @@ export const useAppStore = create<AppState>((set, get) => ({
   currentRole: 'admin',
   setCurrentRole: (currentRole) => set({ currentRole }),
 
+  isSyncing: false,
+  supabaseConnected: false,
+  syncError: null,
+
   customers: initialCustomers,
   selectedCustomerId: 'c1',
   setSelectedCustomerId: (id) => set({ selectedCustomerId: id }),
-  updateCustomerBalance: (customerId, balanceDelta, bottleDelta, depositDelta) =>
+
+  inventory: initialInventory,
+  cart: [
+    {
+      item: initialInventory[0],
+      quantity: 10,
+      unitPrice: initialInventory[0].wholesale_price,
+      lineTotal: 10 * initialInventory[0].wholesale_price,
+    },
+  ],
+  depositBottlesCount: 0,
+  setDepositBottlesCount: (depositBottlesCount) => set({ depositBottlesCount }),
+  orders: initialOrders,
+  bottleLedger: initialBottleLedger,
+  batches: initialBatches,
+
+  // Live Supabase Fetcher
+  fetchFromSupabase: async () => {
+    set({ isSyncing: true, syncError: null });
+    try {
+      const supabase = createClient();
+
+      // 1. Fetch Customers
+      const { data: custData, error: custErr } = await supabase
+        .from('customers')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+      // 2. Fetch Inventory
+      const { data: invData, error: invErr } = await supabase
+        .from('inventory_items')
+        .select('*')
+        .order('type');
+
+      // 3. Fetch Orders
+      const { data: ordData, error: ordErr } = await supabase
+        .from('orders')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+      // 4. Fetch Bottle Ledger
+      const { data: blData, error: blErr } = await supabase
+        .from('bottle_ledger')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+      // 5. Fetch Production Batches
+      const { data: batchData, error: batchErr } = await supabase
+        .from('production_batches')
+        .select('*')
+        .order('produced_at', { ascending: false });
+
+      const hasSupabaseData =
+        (custData && custData.length > 0) ||
+        (invData && invData.length > 0) ||
+        (ordData && ordData.length > 0);
+
+      if (hasSupabaseData) {
+        set({
+          supabaseConnected: true,
+          isSyncing: false,
+          customers: custData && custData.length > 0 ? (custData as Customer[]) : get().customers,
+          selectedCustomerId: custData && custData.length > 0 ? custData[0].id : get().selectedCustomerId,
+          inventory: invData && invData.length > 0 ? (invData as InventoryItem[]) : get().inventory,
+          orders: ordData && ordData.length > 0 ? (ordData as Order[]) : get().orders,
+          bottleLedger: blData && blData.length > 0 ? (blData as BottleLedger[]) : get().bottleLedger,
+          batches: batchData && batchData.length > 0 ? (batchData as ProductionBatch[]) : get().batches,
+        });
+      } else {
+        // If query succeeded but tables are empty, mark connected
+        if (!custErr && !invErr) {
+          set({ supabaseConnected: true, isSyncing: false });
+        } else {
+          set({
+            isSyncing: false,
+            syncError: custErr?.message || invErr?.message || 'Using local demo data',
+          });
+        }
+      }
+    } catch (err: any) {
+      set({
+        isSyncing: false,
+        syncError: err?.message || 'Unable to connect to Supabase, using local fallback.',
+      });
+    }
+  },
+
+  updateCustomerBalance: async (customerId, balanceDelta, bottleDelta, depositDelta) => {
     set((state) => ({
       customers: state.customers.map((c) =>
         c.id === customerId
@@ -365,32 +463,58 @@ export const useAppStore = create<AppState>((set, get) => ({
             }
           : c
       ),
-    })),
+    }));
 
-  inventory: initialInventory,
-  deductInventory: (sku, quantity) =>
+    // Sync to Supabase
+    try {
+      const supabase = createClient();
+      const currentCust = get().customers.find((c) => c.id === customerId);
+      if (currentCust) {
+        await supabase
+          .from('customers')
+          .update({
+            current_balance: currentCust.current_balance,
+            empty_bottles_held: currentCust.empty_bottles_held,
+            deposit_balance: currentCust.deposit_balance,
+          })
+          .eq('id', customerId);
+      }
+    } catch {
+      // offline fallback
+    }
+  },
+
+  deductInventory: async (sku, quantity) => {
     set((state) => ({
       inventory: state.inventory.map((item) =>
         item.sku === sku ? { ...item, qty_on_hand: Math.max(0, item.qty_on_hand - quantity) } : item
       ),
-    })),
-  addInventory: (sku, quantity) =>
+    }));
+
+    try {
+      const supabase = createClient();
+      const updated = get().inventory.find((i) => i.sku === sku);
+      if (updated) {
+        await supabase.from('inventory_items').update({ qty_on_hand: updated.qty_on_hand }).eq('sku', sku);
+      }
+    } catch {}
+  },
+
+  addInventory: async (sku, quantity) => {
     set((state) => ({
       inventory: state.inventory.map((item) =>
         item.sku === sku ? { ...item, qty_on_hand: item.qty_on_hand + quantity } : item
       ),
-    })),
+    }));
 
-  cart: [
-    {
-      item: initialInventory[0], // 20L Gallon
-      quantity: 10,
-      unitPrice: initialInventory[0].wholesale_price,
-      lineTotal: 10 * initialInventory[0].wholesale_price,
-    },
-  ],
-  depositBottlesCount: 0,
-  setDepositBottlesCount: (depositBottlesCount) => set({ depositBottlesCount }),
+    try {
+      const supabase = createClient();
+      const updated = get().inventory.find((i) => i.sku === sku);
+      if (updated) {
+        await supabase.from('inventory_items').update({ qty_on_hand: updated.qty_on_hand }).eq('sku', sku);
+      }
+    } catch {}
+  },
 
   addToCart: (item, qty = 1) => {
     const { cart, customers, selectedCustomerId } = get();
@@ -435,8 +559,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   clearCart: () => set({ cart: [], depositBottlesCount: 0 }),
 
-  orders: initialOrders,
-  updateOrderStatus: (orderId, status, proofUrl, bottlesDelivered, bottlesReturned) =>
+  updateOrderStatus: async (orderId, status, proofUrl, bottlesDelivered, bottlesReturned) => {
     set((state) => ({
       orders: state.orders.map((ord) =>
         ord.id === orderId
@@ -450,27 +573,92 @@ export const useAppStore = create<AppState>((set, get) => ({
             }
           : ord
       ),
-    })),
+    }));
 
-  addOrder: (order) =>
+    try {
+      const supabase = createClient();
+      await supabase
+        .from('orders')
+        .update({
+          status,
+          proof_of_delivery_url: proofUrl,
+          bottles_delivered: bottlesDelivered,
+          bottles_returned: bottlesReturned,
+          delivered_at: status === 'delivered' ? new Date().toISOString() : undefined,
+        })
+        .eq('id', orderId);
+    } catch {}
+  },
+
+  addOrder: async (order) => {
     set((state) => ({
       orders: [order, ...state.orders],
-    })),
+    }));
 
-  bottleLedger: initialBottleLedger,
-  addBottleMovement: (entry) =>
-    set((state) => {
-      const newEntry: BottleLedger = {
-        ...entry,
-        id: 'bl-' + Math.random().toString(36).substring(2, 9),
-        created_at: new Date().toISOString(),
-      };
-      return { bottleLedger: [newEntry, ...state.bottleLedger] };
-    }),
+    try {
+      const supabase = createClient();
+      await supabase.from('orders').insert({
+        invoice_number: order.invoice_number,
+        customer_id: order.customer_id,
+        status: order.status,
+        payment_status: order.payment_status,
+        payment_method: order.payment_method,
+        subtotal: order.subtotal,
+        discount: order.discount,
+        total_amount: order.total_amount,
+        paid_amount: order.paid_amount,
+        bottles_delivered: order.bottles_delivered,
+        bottles_returned: order.bottles_returned,
+        deposit_charge: order.deposit_charge,
+        deposit_refund: order.deposit_refund,
+        delivery_date: order.delivery_date,
+      });
+    } catch {}
+  },
 
-  batches: initialBatches,
-  addBatch: (batch) =>
+  addBottleMovement: async (entry) => {
+    const newEntry: BottleLedger = {
+      ...entry,
+      id: 'bl-' + Math.random().toString(36).substring(2, 9),
+      created_at: new Date().toISOString(),
+    };
+
+    set((state) => ({
+      bottleLedger: [newEntry, ...state.bottleLedger],
+    }));
+
+    try {
+      const supabase = createClient();
+      await supabase.from('bottle_ledger').insert({
+        customer_id: entry.customer_id,
+        order_id: entry.order_id,
+        bottles_out: entry.bottles_out,
+        bottles_in: entry.bottles_in,
+        deposit_collected: entry.deposit_collected,
+        deposit_refunded: entry.deposit_refunded,
+        breakage_qty: entry.breakage_qty,
+        notes: entry.notes,
+      });
+    } catch {}
+  },
+
+  addBatch: async (batch) => {
     set((state) => ({
       batches: [batch, ...state.batches],
-    })),
+    }));
+
+    try {
+      const supabase = createClient();
+      await supabase.from('production_batches').insert({
+        batch_number: batch.batch_number,
+        finished_good_id: batch.finished_good_id,
+        target_qty: batch.target_qty,
+        actual_qty: batch.actual_qty,
+        ph_level: batch.ph_level,
+        tds_level: batch.tds_level,
+        qc_passed: batch.qc_passed,
+        notes: batch.notes,
+      });
+    } catch {}
+  },
 }));

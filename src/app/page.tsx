@@ -12,10 +12,15 @@ import ManufacturingView from '@/components/ManufacturingView';
 import { useAppStore } from '@/lib/store';
 
 export default function Home() {
-  const { currentRole } = useAppStore();
+  const { currentRole, fetchFromSupabase } = useAppStore();
   const [currentTab, setCurrentTab] = useState<string>('pos');
 
-  // Adjust default tab when switching role to a driver
+  // Fetch live data directly from Supabase on mount
+  useEffect(() => {
+    fetchFromSupabase();
+  }, [fetchFromSupabase]);
+
+  // Adjust default tab when switching role
   useEffect(() => {
     if (currentRole === 'driver') {
       setCurrentTab('logistics');
